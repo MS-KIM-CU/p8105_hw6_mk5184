@@ -1,0 +1,292 @@
+---
+title: "hw6"
+author: "Minseo Brenda Kim"
+date: "2025-12-01"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE)
+```
+
+## Load libraries
+```{r}
+library(tidyverse)
+library(modelr)
+library(broom)
+library(p8105.datasets)
+```
+
+# Problem 1
+
+The Washington Post has gathered data on homicides in 50 large U.S. cities and made the data available through a GitHub repository.
+
+```{r}
+# Load data and clean
+homicide_df = 
+  read_csv("https://raw.githubusercontent.com/washingtonpost/data-homicides/master/homicide-data.csv") |>
+  mutate(
+    city_state = str_c(city, ", ", state), # create city_state variable
+    resolved = case_when(
+      disposition == "Closed by arrest" ~ 1,
+      disposition == "Open/No arrest" ~ 0,
+      disposition == "Closed without arrest" ~ 0
+    ),
+    victim_age = as.numeric(victim_age) #Be sure that victim_age is numeric
+  ) |>
+  filter(
+    !city_state %in% c("Dallas, TX", "Phoenix, AZ", "Kansas City, MO", "Tulsa, AL"), #Omit cities Dallas, TX; Phoenix, AZ; and Kansas City, MO; Tulsa, AL
+    victim_race %in% c("White", "Black") #limit your analysis those for whom victim_race is white or black
+  ) |>
+  select(city_state, resolved, victim_age, victim_sex, victim_race)
+
+head(homicide_df)
+```
+
+For the city of Baltimore, MD, use the glm function to fit a logistic regression with resolved vs unresolved as the outcome and victim age, sex and race as predictors.
+
+```{r}
+baltimore_df = 
+  homicide_df |>
+  filter(city_state == "Baltimore, MD")
+
+baltimore_glm = 
+  glm(resolved ~ victim_age + victim_sex + victim_race, 
+      data = baltimore_df, 
+      family = binomial())
+
+baltimore_glm |>
+  tidy() |>
+  mutate(
+    OR = exp(estimate),
+    CI_lower = exp(estimate - 1.96 * std.error),
+    CI_upper = exp(estimate + 1.96 * std.error)
+  ) |>
+  filter(term == "victim_sexMale") |>
+  select(term, OR, CI_lower, CI_upper) |>
+  knitr::kable(digits = 3)
+```
+
+Now run glm for each of the cities in your dataset, and extract the adjusted odds ratio (and CI) for solving homicides comparing male victims to female victims.
+
+```{r}
+all_glm = 
+  homicide_df |>
+  nest(data = -city_state) |>
+  mutate(
+    models = map(data, \(df) glm(resolved ~ victim_age + victim_sex + victim_race, 
+                                  data = df, family = binomial())),
+    results = map(models, tidy)
+  ) |>
+  select(city_state, results) |>
+  unnest(results) |>
+  filter(term == "victim_sexMale") |>
+  mutate(
+    OR = exp(estimate),
+    CI_lower = exp(estimate - 1.96 * std.error),
+    CI_upper = exp(estimate + 1.96 * std.error)
+  ) |>
+  select(city_state, OR, CI_lower, CI_upper)
+```
+
+Create a plot that shows the estimated ORs and CIs for each city. Organize cities according to estimated OR, and comment on the plot.
+
+```{r}
+all_glm |>
+  mutate(city_state = fct_reorder(city_state, OR)) |>
+  ggplot(aes(x = city_state, y = OR)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = CI_lower, ymax = CI_upper)) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "red") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) +
+  labs(
+    title = "Estimated Odds Ratio for Each City: Male vs Female Victims",
+    x = "City",
+    y = "Estimated Odds Ratio (95% CI)"
+  )
+```
+
+Most cities show odds ratios below 1, and New York, NY has the smallest Odds Ratio. OR below 1 expalines that homicides with male victims have lower odds of being resolved compared to female victims. Only three cities, Albuquerque, NM, Stockton, CA, and Fresno, CA, have confidence intervals that exceed 1.0, with Albuquerque having the highest point. However, these cities also show notably wider confidence intervals, suggesting greater uncertainty in the estimates, likely because of smaller sample sizes. Also, for most cities, the confidence intervals do not cross the reference line at OR = 1, indicating statistically significant differences in resolution rates by victim gender. 
+
+# Problem 2
+
+For this problem, we’ll use the Central Park weather data we’ve seen elsewhere. The code chunk below will import these data from the p8105.datasets package.
+
+```{r}
+# Load data
+data("weather_df")
+
+weather_df = 
+  weather_df |> 
+  select(name, tmax, tmin, prcp) |>
+  filter(name == "CentralPark_NY") |>
+  drop_na()
+
+head(weather_df)
+```
+
+Use 5000 bootstrap samples and, for each bootstrap sample, produce estimates of these two quantities.
+
+```{r}
+set.seed(123)
+
+boot_results = 
+  weather_df |>
+  modelr::bootstrap(n = 5000) |>
+  mutate(
+    models = map(strap, \(df) lm(tmax ~ tmin + prcp, data = df)),
+    results_r2 = map(models, glance),
+    results_beta = map(models, tidy)
+  ) |>
+  select(.id, results_r2, results_beta) |>
+  unnest(results_r2) |>
+  select(.id, r.squared, results_beta) |>
+  unnest(results_beta) |>
+  select(.id, r.squared, term, estimate) |>
+  pivot_wider(
+    names_from = term,
+    values_from = estimate
+  ) |>
+  rename(beta_0 = `(Intercept)`, beta_1 = tmin, beta_2 = prcp) |>
+  mutate(log_beta_ratio = log(beta_1 / beta_2))
+```
+
+Plot the distribution of your estimates, and describe these in words.
+
+```{r}
+# distribution of r-squared
+boot_results |>
+  ggplot(aes(x = r.squared)) +
+  geom_density() +
+  labs(
+    title = "Distribution of R-squared from Bootstrap Samples",
+    x = "R-squared",
+    y = "Density"
+  )
+```
+
+The distribution of r-squared values is approximately normal with a slight left skew, centered around 0.917. This suggests that the model explains approximately 92% of the variance in maximum temperature, with relatively consistent performance across bootstrap samples.
+
+```{r}
+# distribution of β1/β2
+boot_results |>
+  filter(!is.na(log_beta_ratio)) |>
+  ggplot(aes(x = log_beta_ratio)) +
+  geom_density() +
+  labs(
+    title = "Distribution of log(β1/β2) from Bootstrap Samples",
+    x = "log(β1/β2)",
+    y = "Density"
+  )
+```
+
+The distribution of log(β₁/β₂) is right-skewed with a peak around 7.5 and a long tail extending to approximately 16. This suggests that the ratio of coefficients varies considerably across bootstrap samples, with some samples producing much larger ratios than others. It seems like β₂ is close to zero, which explains small changes in its value across bootstrap samples can lead to large changes in the ratio, particularly when β₂ is very small. It might create the extended right tail in the distribution.
+
+```{r}
+# 95% confidence intervals
+boot_results |>
+  summarize(
+    r2_ci_lower = quantile(r.squared, 0.025),
+    r2_ci_upper = quantile(r.squared, 0.975),
+    log_beta_ci_lower = quantile(log_beta_ratio, 0.025, na.rm = TRUE),
+    log_beta_ci_upper = quantile(log_beta_ratio, 0.975, na.rm = TRUE)
+  ) |>
+  knitr::kable(digits = 3)
+```
+
+The 95% confidence interval for r-squared is approximately (0.893, 0.928), indicating high and consistent model fit. The 95% confidence interval for log(β₁/β₂) is approximately (5.72, 11.02), reflecting the wide variability in this product, likely because of the small magnitude and variability of the precipitation coefficient.
+
+# Problem 3
+
+```{r}
+# Load data and clean
+birthweight_df = 
+  read_csv("https://p8105.com/data/birthweight.csv") |>
+  mutate(
+    babysex = factor(babysex, levels = c(1, 2), labels = c("male", "female")),
+    frace = factor(frace, levels = c(1, 2, 3, 4, 8, 9), 
+                   labels = c("White", "Black", "Asian", "Puerto Rican", "Other", "Unknown")),
+    mrace = factor(mrace, levels = c(1, 2, 3, 4, 8), 
+                   labels = c("White", "Black", "Asian", "Puerto Rican", "Other")),
+    malform = factor(malform, levels = c(0, 1), labels = c("absent", "present"))
+  )
+
+sum(is.na(birthweight_df))
+head(birthweight_df)
+```
+
+Propose a regression model for birthweight. This model may be based on a hypothesized structure for the factors that underly birthweight, on a data-driven model-building process, or a combination of the two. Describe your modeling process and show a plot of model residuals against fitted values – use add_predictions and add_residuals in making this plot.
+
+```{r}
+bw_model = lm(bwt ~ bhead + blength + gaweeks + delwt + smoken + mrace, 
+              data = birthweight_df)
+
+bw_model |>
+  tidy() |>
+  knitr::kable(digits = 3)
+```
+
+I proposed a model based on factors hypothesized to influence birthweight:
+
+- `bhead`: Baby's head circumference - indicator of fetal development
+- `blength`: Baby's length - direct measure of physical growth
+- `gaweeks`: Gestational age - longer gestation generally means higher weight
+- `delwt`: Mother's weight at delivery - maternal nutrition affects fetal growth
+- `smoken`: Smoking during pregnancy - known risk factor for low birthweight
+- `mrace`: Mother's race - accounts for genetic and socioeconomic factors
+
+```{r}
+# plot of model residuals against fitted values
+birthweight_df |>
+  add_predictions(bw_model) |>
+  add_residuals(bw_model) |>
+  ggplot(aes(x = pred, y = resid)) +
+  geom_point(alpha = 0.3) +
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed") +
+  labs(
+    title = "Residuals vs Fitted Values",
+    x = "Fitted Values",
+    y = "Residuals"
+  )
+```
+
+Compare your model to two others:
+
+- One using length at birth and gestational age as predictors (main effects only)
+- One using head circumference, length, sex, and all interactions (including the three-way interaction) between these
+
+Make this comparison in terms of the cross-validated prediction error; use crossv_mc and functions in purrr as appropriate.
+
+```{r}
+compare_df = 
+  crossv_mc(birthweight_df, 100) |>
+  mutate(
+    train = map(train, as_tibble),
+    test = map(test, as_tibble)
+  ) |>
+  mutate(
+    bw_model = map(train, \(df) lm(bwt ~ bhead + blength + gaweeks + delwt + smoken + mrace, data = df)),
+    main_effects_model = map(train, \(df) lm(bwt ~ blength + gaweeks, data = df)),
+    interaction_model = map(train, \(df) lm(bwt ~ bhead * blength * babysex, data = df))
+  ) |>
+  mutate(
+    rmse_my = map2_dbl(bw_model, test, \(mod, df) rmse(mod, df)),
+    rmse_main = map2_dbl(main_effects_model, test, \(mod, df) rmse(mod, df)),
+    rmse_interaction = map2_dbl(interaction_model, test, \(mod, df) rmse(mod, df))
+  )
+```
+
+```{r}
+#rmse summary
+compare_df |>
+  summarize(
+    my_model_rmse = mean(rmse_my),
+    main_effects_rmse = mean(rmse_main),
+    interaction_rmse = mean(rmse_interaction)
+  ) |>
+  knitr::kable(digits = 2)
+```
+
+Based on the cross-validation results, my proposed `bw_model` achieves the best predictive performance with the lowest mean RMSE of 275.76 grams. The main effects model (length + gestational age only) shows substantially worse performance at 334.38 RMSE, indicating that these two predictors are insufficient to accurately predict birthweight. The interaction model (head circumference × length × sex) performs moderately well with an RMSE of 289.69.
+
+`bw_model` suggests that including additional predictors—specifically mother's delivery weight (`delwt`), smoking during pregnancy (`smoken`), and mother's race (`mrace`), which meaningfully improves prediction accuracy beyond just the baby's physical measurements. These maternal characteristics capture important aspects of prenatal environment and maternal health that affect fetal growth.
